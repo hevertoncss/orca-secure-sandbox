@@ -12,6 +12,7 @@ payload="$(cat)"
 resource_id="$(jq -r '.recipeResult.userData.resourceId // empty' <<<"$payload")"
 docker_context="$(jq -r '.recipeResult.userData.dockerContext // empty' <<<"$payload")"
 host_project_root="$(jq -r '.recipeResult.userData.hostProjectRoot // empty' <<<"$payload")"
+git_common_dir="$(jq -r '.recipeResult.userData.gitCommonDir // empty' <<<"$payload")"
 [ -n "$resource_id" ] || die "No resourceId in lifecycle payload."
 [ -n "$docker_context" ] || docker_context="$(resolve_docker_context)"
 
@@ -44,6 +45,7 @@ jq -n \
   --arg label "$resource_id" \
   --arg ctx "$docker_context" \
   --arg hostRoot "$host_project_root" \
+  --arg gitCommon "$git_common_dir" \
   '{
     schemaVersion: 1,
     connection: {
@@ -62,6 +64,7 @@ jq -n \
       provider: "local-docker-ssh",
       resourceId: $label,
       dockerContext: $ctx,
-      hostProjectRoot: $hostRoot
+      hostProjectRoot: $hostRoot,
+      gitCommonDir: $gitCommon
     }
   }'

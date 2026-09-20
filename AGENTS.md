@@ -37,6 +37,31 @@ worktree bind-mounted in.
   token/remote at all. The checkout may be a linked worktree (a `.git`
   *file*, not directory) — the sanity check uses
   `git rev-parse --is-inside-work-tree`, not `[ -d .git ]`, to accept that.
+- **Linked worktrees need a second mount.** A linked worktree's `.git`
+  file points to an *absolute host path* inside the primary checkout's
+  real git dir (`git rev-parse --git-common-dir`) — that's where the
+  objects, refs, HEAD and index for this worktree actually live, not
+  inside the worktree directory itself. Mounting only the worktree
+  directory leaves that pointer dangling inside the container: git (and
+  Orca's own "is this a real repo" check when attaching the workspace)
+  fails there even though it's a perfectly valid worktree on the host.
+  Bit us the first time a real Orca workspace tried to attach
+  (`projectHostSetups:setupExistingFolder ... Not a valid git
+  repository: /workspace`). Fix: `docker-create.sh` also bind-mounts the
+  common git dir, read-write, at that *same* absolute path (Docker mount
+  targets don't have to live under `/workspace`), and grants it the same
+  agent ACL. Skipped entirely for a plain, non-worktree clone, where the
+  common dir already sits inside the main mount. **Trade-off:** this
+  exposes the whole project's shared git history (every branch, every
+  worktree's commits) to the container, not just this one worktree's
+  checked-out files — other worktrees' actual working-directory *files*
+  still aren't mounted, only the shared `.git` metadata/objects. A
+  git-clone-inside-the-container design would avoid that, at the cost of
+  losing live host↔container file sync and needing a real git remote
+  (this repo didn't have one yet when this trade-off was made — revisit
+  if/when it gets a remote and the project is meant to be shared
+  publicly). `docker-destroy.sh` revokes the ACL on this path too,
+  reading it from `userData.gitCommonDir`.
 - **Images as snapshots:** local Docker has no cloud-style VM snapshot,
   so a tagged image plays that role. `docker-base-snapshot.sh` builds
   `orca-local-docker-sandbox-base` from `docker/Dockerfile.base`.
@@ -85,8 +110,11 @@ worktree bind-mounted in.
 - Session user is `agent` (non-root); `sshd_config.d/orca.conf` sets
   `PermitRootLogin no` and `AllowUsers agent`.
 - No bind mount of the host home directory, or of `~/.claude`, `~/.codex`,
-  `~/.ssh`, `~/.aws`, `~/.kube`, or `~/.gnupg` — the *only* mount is the
-  workspace's own worktree.
+  `~/.ssh`, `~/.aws`, `~/.kube`, or `~/.gnupg`. Only the workspace's own
+  worktree is mounted, plus — for a linked worktree only — its primary
+  checkout's shared `.git` dir, so it's never a broader host path than
+  those two ("Linked worktrees need a second mount" above has the why
+  and the trade-off).
 - `/var/run/docker.sock` is never mounted.
 - Never `--privileged`, `--network=host`, or `--pid=host` — not present
   anywhere in these scripts.
@@ -138,11 +166,12 @@ connects over SSH as `agent`, writes through the bind mount, tears down
 cleanly). Merged onto the primary checkout's branch and confirmed visible
 in the Orca app's "Run on" picker. Ready to use for a real workspace.
 
-### Lessons from the first live `--provision` run
+### Lessons from live testing
 
 The static doctor only validates `orca.yaml` wiring; it never boots
-anything, so none of these surfaced until the real self-test ran. Fixed,
-but worth knowing if something in this area changes later:
+anything, so none of these surfaced until either `--provision` or a real
+Orca workspace exercised the scripts for real. Fixed, but worth knowing
+if something in this area changes later:
 
 1. **cwd captured after `cd`.** `docker-create.sh` needs its own script
    directory as cwd (to `source ./docker-lib.sh` reliably) but also needs
@@ -157,9 +186,29 @@ but worth knowing if something in this area changes later:
    "Identity key" above — a *default* ACL entry applies to files created
    after the grant too, so ordering doesn't help; the key has to be
    somewhere the recipe never mounts or ACL-grants.
+4. **`docker-state.json` is worktree-local, but Docker images aren't.**
+   Orca creates a fresh worktree per workspace; only the *first* worktree
+   (the one `docker-base-auth.sh` was actually run in) has a
+   `docker-state.json` recording `authImage`, since that file is
+   gitignored and never committed. `docker-create.sh` must fall back to
+   `AUTH_IMAGE_DEFAULT` (a fixed tag name), not `""`, so a workspace
+   created from any *other* worktree still finds the already-built image
+   — it exists in the shared Docker daemon regardless of which worktree
+   asks. Let the subsequent `docker image inspect` be the real
+   existence check, not the state lookup.
+5. **A linked worktree needs its primary checkout's `.git` mounted too.**
+   See "Linked worktrees need a second mount" above. This one didn't
+   surface via `--provision` at all — `--provision` was run from the same
+   worktree the whole time, so `git_common_dir` always happened to already
+   exist on that box; it only broke when a *real* Orca workspace (a
+   different worktree) tried to attach, via
+   `projectHostSetups:setupExistingFolder`.
 
 If `--provision` fails again, read `provisionTranscript` in its JSON
 output before guessing — it has the exact stderr from the failing stage.
+But note lesson 5: a clean `--provision` run from *this* worktree doesn't
+prove a fresh workspace's worktree will work too — the interesting bugs
+here have consistently been about state/paths that differ by worktree.
 
 ## Working conventions
 

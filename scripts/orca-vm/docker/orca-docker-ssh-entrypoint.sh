@@ -17,4 +17,15 @@ fi
 chmod 600 /home/agent/.ssh/authorized_keys
 chown -R agent:agent /home/agent/.ssh
 
+# Bind-mounted paths keep their host-side numeric owner, which under
+# rootless Docker's uid mapping isn't the same number agent (container
+# uid 1000) sees itself as (see AGENTS.md's "Linked worktrees" note) --
+# git's dubious-ownership check then refuses to touch them. This
+# container never mounts anything it wasn't deliberately given by
+# docker-create.sh, so trusting every mounted path for the agent user is
+# scoped to this one ephemeral, single-tenant sandbox, not a blanket
+# host-wide exception.
+printf '[safe]\n\tdirectory = *\n' > /home/agent/.gitconfig
+chown agent:agent /home/agent/.gitconfig
+
 exec /usr/sbin/sshd -D -e

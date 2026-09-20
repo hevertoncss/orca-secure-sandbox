@@ -34,6 +34,24 @@ host_project_root="${ORCA_PROJECT_ROOT:-$_invocation_dir}"
 git -C "$host_project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die "host_project_root '$host_project_root' doesn't look like a git checkout. Refusing to bind-mount it."
 
+# A linked worktree's .git is a *pointer file* containing an absolute
+# host path into the primary checkout's real git dir (objects, refs,
+# HEAD, index for this worktree) -- none of that lives inside
+# host_project_root itself. Bind-mounting only host_project_root leaves
+# that pointer dangling inside the container, so git (and Orca's own
+# "is this a real repo" check) fails there even though it's a perfectly
+# valid worktree on the host. Fix: mount the common git dir too, at the
+# *same* absolute path, so the pointer still resolves inside the
+# container. Not needed for a plain (non-worktree) clone, where the
+# common dir is already inside host_project_root and thus already
+# covered by the main mount above.
+git_common_dir="$(git -C "$host_project_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+if [ -n "$git_common_dir" ] && [ "$git_common_dir" != "$host_project_root/.git" ]; then
+  log "Linked worktree detected; will also mount its shared git dir at $git_common_dir (see AGENTS.md)."
+else
+  git_common_dir=""
+fi
+
 recipe_id="$(sanitize_name_component "${ORCA_RECIPE_ID:-$RECIPE_ID}")"
 instance_id="$(sanitize_name_component "${ORCA_VM_INSTANCE_ID:-$(date +%s)-$$}")"
 name="orca-${recipe_id}-${instance_id}"
@@ -43,6 +61,15 @@ pubkey="$(cat "${IDENTITY_FILE}.pub")"
 
 log "Granting the container's agent user access to $host_project_root (POSIX ACL; see AGENTS.md)..."
 grant_agent_acl "$host_project_root" grant
+if [ -n "$git_common_dir" ]; then
+  log "Granting the container's agent user access to $git_common_dir too..."
+  grant_agent_acl "$git_common_dir" grant
+fi
+
+extra_mount_args=()
+if [ -n "$git_common_dir" ]; then
+  extra_mount_args+=(--mount "type=bind,source=${git_common_dir},target=${git_common_dir}")
+fi
 
 cleanup_on_error() {
   local ec=$?
@@ -64,6 +91,7 @@ docker --context "$docker_context" run -d \
   --pids-limit "$CONTAINER_PIDS_LIMIT" \
   --security-opt no-new-privileges \
   --mount "type=bind,source=${host_project_root},target=${CONTAINER_PROJECT_ROOT}" \
+  "${extra_mount_args[@]}" \
   -e "ORCA_SSH_PUBLIC_KEY=${pubkey}" \
   "$auth_image" >&2
 
@@ -84,8 +112,8 @@ key_data="$(awk '{print $2}' <<<"$host_key_line")"
 log "Recording the container's host key for [127.0.0.1]:$port in known_hosts (read via trusted docker exec, per AGENTS.md)..."
 record_known_host "127.0.0.1" "$port" "[127.0.0.1]:${port} ${key_type} ${key_data}"
 
-log "Verifying SSH login as '$AGENT_USER' and bind-mount write access..."
-remote_check="id -un && touch ${CONTAINER_PROJECT_ROOT}/.orca-write-check && rm -f ${CONTAINER_PROJECT_ROOT}/.orca-write-check && echo ORCA_SSH_OK"
+log "Verifying SSH login as '$AGENT_USER', bind-mount write access, and that git actually works there..."
+remote_check="id -un && touch ${CONTAINER_PROJECT_ROOT}/.orca-write-check && rm -f ${CONTAINER_PROJECT_ROOT}/.orca-write-check && echo ORCA_SSH_OK && git -C ${CONTAINER_PROJECT_ROOT} rev-parse --is-inside-work-tree && echo ORCA_GIT_OK"
 verify_out=""
 for _ in $(seq 1 40); do
   if verify_out="$(ssh -i "$IDENTITY_FILE" -p "$port" \
@@ -98,6 +126,7 @@ done
 printf '%s\n' "$verify_out" >&2
 grep -qx "$AGENT_USER" <<<"$verify_out" || die "SSH session did not authenticate as '$AGENT_USER'. Output above."
 grep -q '^ORCA_SSH_OK$' <<<"$verify_out" || die "SSH connected but couldn't write to ${CONTAINER_PROJECT_ROOT} (the bind-mount ACL grant likely failed). Output above."
+grep -q '^ORCA_GIT_OK$' <<<"$verify_out" || die "SSH connected but git doesn't see ${CONTAINER_PROJECT_ROOT} as a repo inside the container (the linked-worktree git-common-dir mount likely failed). Output above."
 
 jq -n \
   --arg root "$CONTAINER_PROJECT_ROOT" \
@@ -108,6 +137,7 @@ jq -n \
   --arg label "$name" \
   --arg ctx "$docker_context" \
   --arg hostRoot "$host_project_root" \
+  --arg gitCommon "$git_common_dir" \
   '{
     schemaVersion: 1,
     connection: {
@@ -126,7 +156,8 @@ jq -n \
       provider: "local-docker-ssh",
       resourceId: $label,
       dockerContext: $ctx,
-      hostProjectRoot: $hostRoot
+      hostProjectRoot: $hostRoot,
+      gitCommonDir: $gitCommon
     }
   }'
 

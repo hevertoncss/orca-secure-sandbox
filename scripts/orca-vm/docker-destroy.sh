@@ -13,6 +13,7 @@ payload="$(cat)"
 resource_id="$(jq -r '.recipeResult.userData.resourceId // empty' <<<"$payload")"
 docker_context="$(jq -r '.recipeResult.userData.dockerContext // empty' <<<"$payload")"
 host_project_root="$(jq -r '.recipeResult.userData.hostProjectRoot // empty' <<<"$payload")"
+git_common_dir="$(jq -r '.recipeResult.userData.gitCommonDir // empty' <<<"$payload")"
 [ -n "$resource_id" ] || die "No resourceId in lifecycle payload."
 [ -n "$docker_context" ] || docker_context="$(resolve_docker_context)"
 
@@ -33,6 +34,10 @@ fi
 if [ -n "$host_project_root" ] && [ -d "$host_project_root" ]; then
   log "Revoking the agent user's ACL grant on $host_project_root..."
   grant_agent_acl "$host_project_root" revoke
+fi
+if [ -n "$git_common_dir" ] && [ -d "$git_common_dir" ]; then
+  log "Revoking the agent user's ACL grant on $git_common_dir..."
+  grant_agent_acl "$git_common_dir" revoke
 fi
 
 log "Removing '$resource_id'..."
