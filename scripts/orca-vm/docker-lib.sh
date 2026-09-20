@@ -6,8 +6,7 @@ log() { printf '%s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
 # Fixed by design (see AGENTS.md). AGENT_UID/AGENT_GID must match the
-# useradd call in docker/Dockerfile.base -- both sides assume the same
-# numeric id when computing the rootless-Docker ACL grant below.
+# useradd call in docker/Dockerfile.base.
 RECIPE_ID="local-docker-sandbox"
 AGENT_USER="agent"
 AGENT_UID=1000
@@ -22,14 +21,10 @@ CONTAINER_PIDS_LIMIT="512"
 _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_FILE="${ORCA_DOCKER_STATE_FILE:-$_lib_dir/docker-state.json}"
 
-# Deliberately NOT under $_lib_dir (i.e. not inside the repo worktree):
-# docker-create.sh bind-mounts and recursively ACL-grants the whole
-# worktree to the container's agent user, including a *default* ACL
-# entry that any new file created under it inherits. A key generated
-# inside that tree picks up that grant and OpenSSH then refuses to load
-# it ("bad permissions") -- this bit us for real the first time this
-# recipe was live-tested. Hashing $_lib_dir keeps the location stable
-# per worktree without needing one inside it.
+# Deliberately not under $_lib_dir (i.e. not inside the repo worktree),
+# so it can never end up inside anything docker-create.sh manages on the
+# container side. Hashing $_lib_dir keeps the location stable per
+# worktree without needing one inside it.
 _keys_root="${XDG_STATE_HOME:-$HOME/.local/state}/orca-local-docker-sandbox"
 _lib_dir_hash="$(printf '%s' "$_lib_dir" | sha256sum | cut -c1-16)"
 KEYS_DIR="${ORCA_DOCKER_KEYS_DIR:-$_keys_root/$_lib_dir_hash}"
@@ -98,40 +93,6 @@ resolve_docker_context() {
       || die "Docker context '$ctx' is not rootless. This recipe requires the host's rootless Docker context."
 
   printf '%s' "$ctx"
-}
-
-# Maps a numeric id declared inside a container to the id it is
-# actually stored as on the host filesystem under rootless Docker's
-# mapping (container id 0 == the invoking host user 1:1; any other id
-# lands in that user's /etc/subuid or /etc/subgid range). See AGENTS.md
-# for why this is needed to let the non-root agent user write into a
-# bind-mounted, host-owned directory.
-# map_file: /etc/subuid or /etc/subgid
-mapped_host_id() {
-  local container_id="$1" map_file="$2"
-  local base range
-  read -r base range < <(awk -F: -v u="$(id -un)" '$1==u{print $2, $3}' "$map_file")
-  [ -n "$base" ] || die "No $(id -un) entry in $map_file. Rootless Docker needs a subuid/subgid range for this user."
-  [ "$container_id" -ge 1 ] || die "mapped_host_id needs a non-zero container id (0 maps 1:1 to the real host user, not through $map_file)."
-  [ "$container_id" -le "$range" ] || die "container id $container_id is outside the mapped range in $map_file (base=$base range=$range)."
-  printf '%s' "$((base + container_id - 1))"
-}
-
-# Grants (mode=grant, default) or revokes (mode=revoke) the container
-# agent user's rwx access to a bind-mount source directory via POSIX
-# ACL, without changing its ownership. Idempotent; safe to call
-# repeatedly.
-grant_agent_acl() {
-  local dir="$1" mode="${2:-grant}"
-  local mapped_uid
-  mapped_uid="$(mapped_host_id "$AGENT_UID" /etc/subuid)"
-  command -v setfacl >/dev/null 2>&1 || die "setfacl not found on host (Debian/Ubuntu package 'acl'); required to grant the container's non-root agent user access to $dir without changing its ownership."
-  if [ "$mode" = "revoke" ]; then
-    setfacl -R -x "u:$mapped_uid" "$dir" 2>/dev/null || true
-    setfacl -R -x "d:u:$mapped_uid" "$dir" 2>/dev/null || true
-  else
-    setfacl -R -m "u:$mapped_uid:rwx" -m "d:u:$mapped_uid:rwx" "$dir"
-  fi
 }
 
 ensure_identity_key() {
