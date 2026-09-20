@@ -119,12 +119,24 @@ ORCA vm recipe doctor local-docker-sandbox --repo-path . --provision --json
 image tags between these scripts. It's local-machine state, not shared —
 every teammate builds their own base and auth images.
 
+**The "Run on" picker in the Orca app only reads `orca.yaml` from the
+*primary* checkout** (`orca repo show` / `git worktree list` tells you
+which path that is), not from whatever worktree you happen to be editing
+it in. If a recipe you just added doesn't show up there, it's almost
+always this: commit it in the worktree, then in the primary checkout
+`git merge --ff-only <that-branch>` (or pull/checkout as appropriate) —
+don't just add more to orca.yaml assuming it's not being picked up.
+Bit us the first time: this repo's primary checkout was on `master` while
+the working worktree was on a separate `main`, so the recipe was
+invisible until fast-forwarded across.
+
 ### Status
 
 Done and verified: scaffolding, the base image, Codex auth inside the
 sandbox, and a live `--provision` self-test all pass (recipe boots,
 connects over SSH as `agent`, writes through the bind mount, tears down
-cleanly). Ready to use for a real workspace.
+cleanly). Merged onto the primary checkout's branch and confirmed visible
+in the Orca app's "Run on" picker. Ready to use for a real workspace.
 
 ### Lessons from the first live `--provision` run
 
