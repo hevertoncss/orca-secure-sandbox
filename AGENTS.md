@@ -44,10 +44,12 @@ repo freshly cloned inside.
   from its own environment (Orca supplies these for a provisioned-root
   recipe) and passes into the container as `-e` vars:
   ```bash
-  git fetch "$ORCA_REPO_URL" "$ORCA_REPO_REF"
+  git fetch "$ORCA_REPO_URL" "$ORCA_REPO_REF" || git fetch "$ORCA_REPO_URL" "$ORCA_REPO_REF_HEAD"
   git cat-file -e "${ORCA_REPO_REF_HEAD}^{commit}"
   git checkout -B "$ORCA_REPO_BRANCH" "$ORCA_REPO_REF_HEAD"
   ```
+  The first fetch attempt is optimistic — see "Lessons" #7 below for why
+  it falls back to fetching the pinned commit by SHA directly.
   Only on first boot — a *resume* (container restart) must never re-run
   this, or it would blow away whatever the agent has done since. Files
   end up natively owned by `agent` (the clone runs as root inside the
@@ -176,12 +178,16 @@ clone/push path by hand:
 head_sha="$(git -C <primary-checkout-path> rev-parse master)"
 ORCA_RECIPE_RESULT_SCHEMA_VERSION=2 \
 ORCA_REPO_URL="git@github.com:hevertoncss/orca-secure-sandbox.git" \
-ORCA_REPO_REF="master" \
+ORCA_REPO_REF="some-test-branch" \
 ORCA_REPO_REF_HEAD="$head_sha" \
 ORCA_REPO_BRANCH="some-test-branch" \
 GH_TOKEN="$(cat /path/to/a/token/file)" \
 ./scripts/orca-vm/docker-create.sh
 ```
+(`ORCA_REPO_REF` deliberately set to a branch name that doesn't exist
+upstream here, matching what a real workspace creation actually sends —
+see "Lessons" #7. The fetch-by-SHA fallback is what's really being
+tested.)
 Then feed the printed `resourceId`/`dockerContext` to `docker-destroy.sh`
 (as `{"recipeResult":{"userData":{...}}}` on stdin) to tear it down.
 
@@ -260,6 +266,25 @@ Orca workspace exercised the scripts for real.
    not an ephemeral-one-checkout-per-workspace model. That's what forced
    the move to `checkoutMode: provisioned-root` (see above) rather than
    a smaller patch.
+7. **`ORCA_REPO_REF` isn't reliably a ref the remote actually has.** The
+   guide describing provisioned-root fetches `$ORCA_REPO_URL`
+   `$ORCA_REPO_REF` directly, implying it names an existing base branch.
+   In practice it arrived as the *new workspace's own branch name*
+   (e.g. `test-sandbox`), which by definition doesn't exist upstream yet
+   — `git fetch` failed with "couldn't find remote ref". The entrypoint
+   now tries `$ORCA_REPO_REF` first, and on failure falls back to
+   fetching `$ORCA_REPO_REF_HEAD` directly by SHA (verified GitHub
+   allows this for a public repo). The pinned commit is the one thing
+   actually guaranteed; don't depend on the ref name resolving.
+8. **The auth image's entrypoint now requires `ORCA_REPO_*` env vars on
+   first boot** (that's the whole point), which broke the hot-patch
+   maintenance flow (`docker run -d --name x "$auth_image"` with no
+   extra vars, used to copy in a fixed entrypoint without redoing the
+   Codex login) — the container died immediately on the missing vars
+   before it could be `cp`'d into. Fix: override the entrypoint for that
+   one maintenance container (`docker run --entrypoint sleep "$auth_image"
+   infinity`), patch, commit, remove — never invoke the real entrypoint
+   for a patch-only container.
 
 If `--provision` (or a manual `docker-create.sh` run) fails, read
 stderr/`provisionTranscript` before guessing — it has the exact point of

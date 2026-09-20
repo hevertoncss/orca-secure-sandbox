@@ -48,7 +48,16 @@ if [ ! -d /workspace/.git ]; then
   mkdir -p /workspace
   cd /workspace
   git init -q
-  git fetch "$ORCA_REPO_URL" "$ORCA_REPO_REF"
+  # ORCA_REPO_REF isn't reliably a name the remote actually has -- in
+  # practice it has arrived as the *new* workspace branch (which by
+  # definition doesn't exist upstream yet), not a base branch like
+  # "master". Try it, but the pinned commit is the one guarantee we
+  # actually have, and GitHub allows fetching an exact SHA directly for
+  # a public repo (verified), so fall back to that.
+  if ! git fetch "$ORCA_REPO_URL" "$ORCA_REPO_REF" 2>&1; then
+    echo "orca-docker-ssh-entrypoint: fetching ref '$ORCA_REPO_REF' failed; falling back to fetching the pinned commit $ORCA_REPO_REF_HEAD directly..." >&2
+    git fetch "$ORCA_REPO_URL" "$ORCA_REPO_REF_HEAD"
+  fi
   git cat-file -e "${ORCA_REPO_REF_HEAD}^{commit}"
   git checkout -B "$ORCA_REPO_BRANCH" "$ORCA_REPO_REF_HEAD"
   git remote add origin "$ORCA_REPO_URL" 2>/dev/null || git remote set-url origin "$ORCA_REPO_URL"
