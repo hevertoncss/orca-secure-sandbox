@@ -58,7 +58,9 @@ pubkey="$(cat "${IDENTITY_FILE}.pub")"
 cleanup_on_error() {
   local ec=$?
   if [ "$ec" -ne 0 ]; then
-    log "create failed (exit $ec); removing '$name'..."
+    log "create failed (exit $ec); container logs for '$name' (may be empty if it never started):"
+    docker --context "$docker_context" logs "$name" >&2 2>&1 || true
+    log "removing '$name'..."
     docker --context "$docker_context" rm -f "$name" >/dev/null 2>&1 || true
   fi
 }
@@ -111,6 +113,16 @@ for _ in $(seq 1 60); do
         -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes \
         "${AGENT_USER}@127.0.0.1" "$remote_check" 2>&1)"; then
     break
+  fi
+  # If the container itself has already exited (almost always because
+  # the entrypoint's clone/checkout step failed under set -e, so sshd
+  # never got exec'd), retrying the SSH connection for the rest of the
+  # 60s is pointless -- bail now with the container's own logs, which
+  # have the actual git error.
+  status="$(docker --context "$docker_context" inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"
+  if [ "$status" != "running" ]; then
+    docker --context "$docker_context" logs "$name" >&2 || true
+    die "Container '$name' exited (status: ${status:-unknown}) before SSH ever came up; logs above."
   fi
   sleep 1
 done
