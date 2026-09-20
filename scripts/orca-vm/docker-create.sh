@@ -13,10 +13,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./docker-lib.sh
 
 docker_context="$(resolve_docker_context)"
-auth_image="$(env_or_state ORCA_DOCKER_AUTH_IMAGE authImage "")"
-[ -n "$auth_image" ] || die "No authenticated image recorded in state. Run docker-base-snapshot.sh then docker-base-auth.sh first."
+# Falls back to the fixed default tag, not "" -- docker-state.json is
+# gitignored and worktree-local, so a *different* workspace's worktree
+# (Orca creates a fresh one per workspace) never has it, even though the
+# image itself already exists and is shared by the whole Docker daemon.
+# The image-inspect check right below is the real existence check.
+auth_image="$(env_or_state ORCA_DOCKER_AUTH_IMAGE authImage "$AUTH_IMAGE_DEFAULT")"
 docker --context "$docker_context" image inspect "$auth_image" >/dev/null 2>&1 \
-  || die "Authenticated image '$auth_image' not found on context '$docker_context'. Re-run docker-base-auth.sh."
+  || die "Authenticated image '$auth_image' not found on context '$docker_context'. Run docker-base-snapshot.sh then docker-base-auth.sh first."
 
 # The bind-mount source is always THIS invocation's own workspace
 # checkout -- deliberately never read from state, because state is
