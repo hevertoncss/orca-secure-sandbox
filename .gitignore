@@ -1,0 +1,4 @@
+# local-docker-sandbox recipe (scripts/orca-vm/) -- host-specific, not
+# shared. Each machine builds its own images and generates its own SSH
+# keypair (stored outside the repo entirely -- see AGENTS.md).
+/scripts/orca-vm/docker-state.json

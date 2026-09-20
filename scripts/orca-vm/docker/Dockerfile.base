@@ -1,0 +1,61 @@
+# Base image for the local-docker-sandbox recipe. Built by
+# ../docker-base-snapshot.sh, authenticated by ../docker-base-auth.sh,
+# and booted per workspace by ../docker-create.sh. See ../../../AGENTS.md.
+FROM debian:12-slim
+
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-server \
+        openssh-client \
+        git \
+        curl \
+        ca-certificates \
+        jq \
+        gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js, so the Codex CLI (an npm package that requires Node >=16) can run.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @openai/codex \
+    && npm cache clean --force
+
+# Non-root user for all agent sessions. UID/GID are fixed and must
+# match AGENT_UID/AGENT_GID in ../docker-lib.sh: docker-create.sh grants
+# this exact id host-filesystem access via a POSIX ACL, computed
+# through rootless Docker's subuid/subgid mapping.
+RUN groupadd --gid "${AGENT_GID}" agent \
+    && useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --shell /bin/bash agent
+
+# Key-only SSH; only the agent user may connect, and never root.
+RUN mkdir -p /etc/ssh/sshd_config.d /run/sshd \
+    && printf '%s\n' \
+        'PermitRootLogin no' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        'PubkeyAuthentication yes' \
+        'AllowUsers agent' \
+        'X11Forwarding no' \
+        'AcceptEnv LANG LC_*' \
+        > /etc/ssh/sshd_config.d/orca.conf \
+    && mkdir -p /home/agent/.ssh \
+    && chmod 700 /home/agent/.ssh \
+    && chown -R agent:agent /home/agent/.ssh \
+    # Never bake host keys into the image -- the entrypoint generates a
+    # fresh, container-unique set on first start of each container.
+    && rm -f /etc/ssh/ssh_host_*
+
+RUN mkdir -p /workspace && chown agent:agent /workspace
+
+COPY orca-docker-ssh-entrypoint.sh /usr/local/bin/orca-docker-ssh-entrypoint
+RUN chmod 755 /usr/local/bin/orca-docker-ssh-entrypoint
+
+WORKDIR /workspace
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/orca-docker-ssh-entrypoint"]
